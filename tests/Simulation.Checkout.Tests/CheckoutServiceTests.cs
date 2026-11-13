@@ -218,4 +218,112 @@ public class CheckoutServiceTests
         receipt.Discount.Should().Be(100m);
         receipt.Total.Should().Be(1400m);
     }
+
+    // --- Task 2: Mocks (Moq) ---
+
+    [Fact]
+    public async Task CheckoutAsync_WhenOrderIsValidAndAllItemsInStock_ShouldSaveOrderAndSendConfirmationOnce()
+    {
+        var order = new Order
+        {
+            CustomerName = "Alice",
+            CustomerEmail = "alice@example.com",
+            Items = new List<OrderItem>
+            {
+                new()
+                {
+                    ProductId = Guid.NewGuid(),
+                    ProductName = "Mechanical Keyboard",
+                    UnitPrice = 150m,
+                    Quantity = 2
+                }
+            }
+        };
+
+        var receipt = await _sut.CheckoutAsync(order);
+
+        receipt.Should().NotBeNull();
+        _orderRepositoryMock.Verify(
+            x => x.SaveAsync(order, It.IsAny<CancellationToken>()),
+            Times.Once);
+        _notificationServiceMock.Verify(
+            x => x.SendOrderConfirmationAsync(receipt, It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task CheckoutAsync_WhenOneItemIsOutOfStock_ShouldThrowInsufficientInventoryExceptionAndNeverSaveOrSend()
+    {
+        var inStockItem = new OrderItem
+        {
+            ProductId = Guid.NewGuid(),
+            ProductName = "Available Item",
+            UnitPrice = 100m,
+            Quantity = 1
+        };
+        var outOfStockItem = new OrderItem
+        {
+            ProductId = Guid.NewGuid(),
+            ProductName = "Out Of Stock Item",
+            UnitPrice = 200m,
+            Quantity = 1
+        };
+        var order = new Order
+        {
+            CustomerName = "Bob",
+            CustomerEmail = "bob@example.com",
+            Items = new List<OrderItem> { inStockItem, outOfStockItem }
+        };
+
+        _inventoryServiceMock
+            .Setup(x => x.IsAvailableAsync(inStockItem.ProductId, inStockItem.Quantity, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _inventoryServiceMock
+            .Setup(x => x.IsAvailableAsync(outOfStockItem.ProductId, outOfStockItem.Quantity, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var act = async () => await _sut.CheckoutAsync(order);
+
+        var exceptionAssertion = await act.Should().ThrowAsync<InsufficientInventoryException>();
+        exceptionAssertion.WithMessage($"Insufficient inventory for '{outOfStockItem.ProductName}'.");
+        _orderRepositoryMock.Verify(
+            x => x.SaveAsync(It.IsAny<Order>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        _notificationServiceMock.Verify(
+            x => x.SendOrderConfirmationAsync(It.IsAny<CheckoutReceipt>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task CheckoutAsync_WhenOrderFailsValidation_ShouldNeverCheckInventorySaveOrSendConfirmation()
+    {
+        var order = new Order
+        {
+            CustomerName = "David",
+            CustomerEmail = "david@example.com",
+            Items = new List<OrderItem>
+            {
+                new()
+                {
+                    ProductId = Guid.NewGuid(),
+                    ProductName = "Invalid Item",
+                    UnitPrice = 100m,
+                    Quantity = 0
+                }
+            }
+        };
+
+        var act = async () => await _sut.CheckoutAsync(order);
+
+        await act.Should().ThrowAsync<InvalidQuantityException>();
+        _inventoryServiceMock.Verify(
+            x => x.IsAvailableAsync(It.IsAny<Guid>(), It.IsAny<int>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        _orderRepositoryMock.Verify(
+            x => x.SaveAsync(It.IsAny<Order>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        _notificationServiceMock.Verify(
+            x => x.SendOrderConfirmationAsync(It.IsAny<CheckoutReceipt>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
 }
